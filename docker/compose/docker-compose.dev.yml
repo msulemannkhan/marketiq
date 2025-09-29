@@ -1,0 +1,106 @@
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: laptop_intelligence_db_dev
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-laptop_intelligence}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "${DB_PORT:-5434}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../scripts/docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-laptop_intelligence}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - laptop_intelligence_network
+
+  # Backend API
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile.dev
+    container_name: laptop_intelligence_backend_dev
+    ports:
+      - "${BACKEND_PORT:-8005}:8000"
+    environment:
+      # Database
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laptop_intelligence}
+
+      # AI Services (from .env file)
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT}
+      - PINECONE_INDEX=${PINECONE_INDEX}
+
+      # Security
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_EXPIRATION_HOURS=${JWT_EXPIRATION_HOURS:-24}
+
+      # Application
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - DEBUG=${DEBUG:-true}
+      - LOAD_SAMPLE_DATA=${LOAD_SAMPLE_DATA:-true}
+
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ../../data:/app/data
+      - ../../backend:/app  # Mount source code for hot reload
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - laptop_intelligence_network
+    restart: unless-stopped
+
+  # Data initialization service
+  data_loader:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: laptop_intelligence_data_loader_dev
+    ports:
+      - "${DATA_LOADER_PORT:-6335}:6335"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-laptop_intelligence}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT}
+      - PINECONE_INDEX=${PINECONE_INDEX}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ../../data:/app/data
+    command: >
+      sh -c "
+        echo 'Waiting for services to be ready...'
+        sleep 10
+        echo 'Loading sample data...'
+        python scripts/load_sample_reviews.py
+        echo 'Setting up embeddings in Pinecone...'
+        python scripts/setup_embeddings.py
+        echo 'Data initialization complete!'
+      "
+    networks:
+      - laptop_intelligence_network
+    restart: "no"
+
+networks:
+  laptop_intelligence_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
